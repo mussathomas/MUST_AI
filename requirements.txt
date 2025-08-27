@@ -6,4 +6,4 @@ pdfplumber
 numpy
 scikit-learn
 sentence-transformers
-chromadb
+chromadb==0.4.22
