@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import google.generativeai as genai
 import pdfplumber
-import chromadb
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import json
@@ -16,18 +16,25 @@ from dotenv import load_dotenv
 from pathlib import Path
 import tempfile
 
-# Attempt to import SentenceTransformer
+# Attempt to import FAISS and SentenceTransformer
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    st.warning("FAISS library not available. Using TF-IDF fallback for embeddings.")
+    FAISS_AVAILABLE = False
+
 try:
     from sentence_transformers import SentenceTransformer
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
-    st.error("The 'sentence_transformers' library is not installed. Falling back to TF-IDF for embeddings. To use SentenceTransformer, install it with: `pip install sentence-transformers`")
-    SentenceTransformer = None
+    st.warning("SentenceTransformers library not available. Using TF-IDF fallback for embeddings.")
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
-# Custom CSS for UI
+
+# Custom CSS for UI (same as original)
 st.markdown("""
 <style>
 /* Chat Container */
@@ -38,7 +45,6 @@ st.markdown("""
     max-width: 100%;
     padding: 0 1rem;
 }
-
 /* Base chat message styling */
 .chat-message {
     padding: 0.75rem 1rem;
@@ -50,7 +56,6 @@ st.markdown("""
     position: relative;
     clear: both;
 }
-
 /* User messages - aligned right */
 .user-message {
     background: linear-gradient(135deg, #2196F3, #1976D2);
@@ -61,7 +66,6 @@ st.markdown("""
     float: right;
     text-align: left;
 }
-
 .user-message::after {
     content: '';
     position: absolute;
@@ -74,7 +78,6 @@ st.markdown("""
     border-right: 0;
     border-bottom-right-radius: 16px;
 }
-
 /* Assistant messages - aligned left */
 .assistant-message {
     background-color: #f5f5f5;
@@ -86,7 +89,6 @@ st.markdown("""
     float: left;
     text-align: left;
 }
-
 .assistant-message::after {
     content: '';
     position: absolute;
@@ -99,14 +101,12 @@ st.markdown("""
     border-left: 0;
     border-bottom-left-radius: 16px;
 }
-
 /* Message container to handle floating */
 .message-container {
     width: 100%;
     overflow: hidden;
     margin-bottom: 1rem;
 }
-
 /* Greeting message */
 .greeting-message {
     background: linear-gradient(135deg, #e8f5e8, #c8e6c9);
@@ -117,11 +117,9 @@ st.markdown("""
     text-align: center;
     float: none;
 }
-
 .greeting-message::after {
     display: none;
 }
-
 /* Typing indicator */
 .typing-indicator {
     background-color: #f8f9fa;
@@ -131,17 +129,14 @@ st.markdown("""
     margin-right: auto;
     float: left;
 }
-
 .typing-indicator::after {
     border-bottom-color: #f8f9fa;
 }
-
 .typing-text {
     font-family: 'Courier New', monospace;
     white-space: pre-wrap;
     word-wrap: break-word;
 }
-
 .typing-cursor {
     display: inline-block;
     background-color: #333;
@@ -150,23 +145,19 @@ st.markdown("""
     animation: blink 1s step-end infinite;
     margin-left: 2px;
 }
-
 /* Animations */
 @keyframes pulse {
     from { border-left-color: #FFC107; }
     to { border-left-color: #FF9800; }
 }
-
 @keyframes blink {
     0%, 50% { opacity: 1; }
     51%, 100% { opacity: 0; }
 }
-
 /* Button styling */
 .stButton > button {
     width: 100%;
 }
-
 /* History items */
 .prompt-history-item, .chart-history-item {
     padding: 0.75rem;
@@ -178,20 +169,17 @@ st.markdown("""
     transition: all 0.3s ease;
     word-wrap: break-word;
 }
-
 .prompt-history-item:hover, .chart-history-item:hover {
     background-color: #e3f2fd;
     border-color: #2196F3;
     transform: translateY(-1px);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
-
 .chart-history-item.active {
     background-color: #d1ecf1;
     border-color: #0dcaf0;
     box-shadow: 0 2px 4px rgba(13, 202, 240, 0.2);
 }
-
 /* Responsive Design */
 @media (max-width: 768px) {
     .chat-message {
@@ -215,7 +203,6 @@ st.markdown("""
         font-size: 14px;
     }
 }
-
 @media (max-width: 480px) {
     .chat-message {
         max-width: 95%;
@@ -237,7 +224,6 @@ st.markdown("""
         font-size: 13px;
     }
 }
-
 @media (min-width: 1200px) {
     .chat-message {
         max-width: 70%;
@@ -248,7 +234,6 @@ st.markdown("""
         margin: 0 auto;
     }
 }
-
 /* Dark mode support (if needed) */
 @media (prefers-color-scheme: dark) {
     .assistant-message {
@@ -272,7 +257,6 @@ st.markdown("""
         border-color: #2196F3;
     }
 }
-
 /* Clearfix for floating elements */
 .clearfix::after {
     content: "";
@@ -406,11 +390,13 @@ class PDFAIAssistant:
     def __init__(self, api_key):
         self.api_key = api_key
         self.embedding_model = None
-        self.collection = None
-        self.client = None
+        self.faiss_index = None
         self.vectorizer = None
         self.tfidf_matrix = None
         self.model = None
+        self.chunk_metadata = []
+        self.all_chunks = []  # Store all chunks for retrieval
+        self.embedding_method = "none"  # Track which method is being used
         
         # Initialize components
         self.setup_gemini()
@@ -429,42 +415,33 @@ class PDFAIAssistant:
             return False
     
     def setup_embeddings(self):
-        """Set up embedding system (ChromaDB with SentenceTransformers or TF-IDF fallback)"""
+        """Set up embedding system with proper fallback"""
         try:
-            if SENTENCE_TRANSFORMERS_AVAILABLE:
+            # Try FAISS with SentenceTransformers first
+            if FAISS_AVAILABLE and SENTENCE_TRANSFORMERS_AVAILABLE:
                 try:
                     self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-                    self.client = chromadb.Client()
+                    # Test the model to make sure it works
+                    test_embedding = self.embedding_model.encode(["test"])
+                    embedding_dim = test_embedding.shape[1]
                     
-                    # Try to get or create collection
-                    try:
-                        self.collection = self.client.get_or_create_collection("pdf_documents")
-                        st.success("Successfully accessed or created ChromaDB collection 'pdf_documents'.")
-                    except Exception as collection_error:
-                        st.warning(f"Failed to access or create ChromaDB collection: {str(collection_error)}. Falling back to TF-IDF.")
-                        self.embedding_model = None
-                        self.collection = None
-                        self.client = None
-                        # Initialize TF-IDF as fallback
-                        self.vectorizer = TfidfVectorizer(max_features=512, stop_words='english')
-                        st.info("Using TF-IDF for document embeddings (fallback mode).")
-                        return True
-                    
+                    # Initialize FAISS index with correct dimensions
+                    self.faiss_index = faiss.IndexFlatL2(embedding_dim)
+                    self.embedding_method = "faiss"
+                    st.success("FAISS with SentenceTransformers initialized successfully.")
                     return True
+                    
                 except Exception as e:
-                    st.warning(f"ChromaDB setup failed: {str(e)}. Falling back to TF-IDF.")
+                    st.warning(f"FAISS setup failed: {str(e)}. Falling back to TF-IDF.")
                     self.embedding_model = None
-                    self.collection = None
-                    self.client = None
-                    # Initialize TF-IDF as fallback
-                    self.vectorizer = TfidfVectorizer(max_features=512, stop_words='english')
-                    st.info("Using TF-IDF for document embeddings (fallback mode).")
-                    return True
-            else:
-                # Fallback to TF-IDF if SentenceTransformers is not available
-                self.vectorizer = TfidfVectorizer(max_features=512, stop_words='english')
-                st.info("Using TF-IDF for document embeddings (fallback mode).")
-                return True
+                    self.faiss_index = None
+            
+            # Fallback to TF-IDF
+            self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english', ngram_range=(1, 2))
+            self.embedding_method = "tfidf"
+            st.info("Using TF-IDF for document embeddings (fallback mode).")
+            return True
+            
         except Exception as e:
             st.error(f"Failed to set up embeddings: {str(e)}")
             return False
@@ -513,7 +490,7 @@ class PDFAIAssistant:
                 os.unlink(tmp_file_path)
                 
                 # Create text chunks
-                chunks = self.create_text_chunks(full_text)
+                chunks = self.create_text_chunks(full_text, pdf_name)
                 
                 # Store extracted tables
                 if tables_data:
@@ -532,18 +509,19 @@ class PDFAIAssistant:
             st.error(f"Error extracting PDF {pdf_name}: {str(e)}")
             return "", []
     
-    def create_text_chunks(self, text, chunk_size=1000, overlap=200):
+    def create_text_chunks(self, text, pdf_name, chunk_size=1000, overlap=200):
         """Split text into overlapping chunks for better context"""
         try:
             chunks = []
             words = text.split()
             
             for i in range(0, len(words), chunk_size - overlap):
-                chunk = ' '.join(words[i:i + chunk_size])
-                if chunk.strip():
+                chunk_text = ' '.join(words[i:i + chunk_size])
+                if chunk_text.strip():
                     chunks.append({
-                        'text': chunk,
+                        'text': chunk_text,
                         'chunk_id': len(chunks),
+                        'pdf_name': pdf_name,
                         'start_word': i,
                         'end_word': min(i + chunk_size, len(words))
                     })
@@ -557,75 +535,67 @@ class PDFAIAssistant:
         """Create embeddings for all loaded PDF chunks"""
         try:
             # Collect all chunks from all PDFs
-            all_chunks = []
+            self.all_chunks = []
             all_texts = []
+            self.chunk_metadata = []
             
             for pdf_name, chunks in st.session_state.all_pdf_chunks.items():
-                all_chunks.extend(chunks)
-                all_texts.extend([chunk['text'] for chunk in chunks])
+                for chunk in chunks:
+                    self.all_chunks.append(chunk)
+                    all_texts.append(chunk['text'])
+                    self.chunk_metadata.append({
+                        'pdf_name': pdf_name,
+                        'chunk_id': chunk['chunk_id']
+                    })
             
             if not all_texts:
                 st.warning("No text chunks available to create embeddings.")
                 return False
             
-            # Use ChromaDB with SentenceTransformers if available
-            if self.collection and self.embedding_model:
+            # Use the appropriate embedding method
+            if self.embedding_method == "faiss" and self.faiss_index is not None:
                 try:
-                    # Generate embeddings
-                    embeddings = self.embedding_model.encode(all_texts)
+                    # Generate embeddings in batches to avoid memory issues
+                    batch_size = 32
+                    all_embeddings = []
                     
-                    # Process in batches to avoid memory issues
-                    batch_size = 100
                     for i in range(0, len(all_texts), batch_size):
                         batch_texts = all_texts[i:i + batch_size]
-                        batch_embeddings = embeddings[i:i + batch_size]
-                        batch_ids = [f"chunk_{j}" for j in range(i, min(i + batch_size, len(all_texts)))]
-                        
-                        # Create metadata for each chunk
-                        batch_metadatas = []
-                        for j in range(i, min(i + batch_size, len(all_texts))):
-                            # Find which PDF this chunk belongs to
-                            pdf_name = "unknown"
-                            current_idx = 0
-                            for p_name, chunks in st.session_state.all_pdf_chunks.items():
-                                if j < current_idx + len(chunks):
-                                    pdf_name = p_name
-                                    break
-                                current_idx += len(chunks)
-                            
-                            batch_metadatas.append({
-                                'pdf_name': pdf_name, 
-                                'chunk_id': j
-                            })
-                        
-                        # Upsert to ChromaDB
-                        self.collection.upsert(
-                            embeddings=batch_embeddings.tolist(),
-                            documents=batch_texts,
-                            ids=batch_ids,
-                            metadatas=batch_metadatas
-                        )
+                        batch_embeddings = self.embedding_model.encode(batch_texts)
+                        all_embeddings.append(batch_embeddings)
                     
-                    st.success("Embeddings created successfully for all PDFs using ChromaDB.")
+                    # Combine all embeddings
+                    embeddings = np.vstack(all_embeddings).astype('float32')
+                    
+                    # Reset FAISS index and add embeddings
+                    embedding_dim = embeddings.shape[1]
+                    self.faiss_index = faiss.IndexFlatL2(embedding_dim)
+                    self.faiss_index.add(embeddings)
+                    
+                    st.success(f"FAISS embeddings created for {len(all_texts)} chunks.")
                     return True
-                
-                except Exception as chroma_error:
-                    st.warning(f"ChromaDB failed: {str(chroma_error)}. Falling back to TF-IDF.")
-                    # Fall back to TF-IDF
-                    if self.vectorizer is None:
-                        self.vectorizer = TfidfVectorizer(max_features=512, stop_words='english')
-                    self.tfidf_matrix = self.vectorizer.fit_transform(all_texts)
-                    st.success("TF-IDF embeddings created as fallback.")
-                    return True
+                    
+                except Exception as faiss_error:
+                    st.warning(f"FAISS failed: {str(faiss_error)}. Falling back to TF-IDF.")
+                    self.embedding_method = "tfidf"
+                    self.faiss_index = None
+                    self.embedding_model = None
             
-            else:
-                # Use TF-IDF fallback
-                if self.vectorizer is None:
-                    self.vectorizer = TfidfVectorizer(max_features=512, stop_words='english')
-                
-                self.tfidf_matrix = self.vectorizer.fit_transform(all_texts)
-                st.success("TF-IDF embeddings created successfully.")
-                return True
+            # TF-IDF fallback
+            if self.embedding_method == "tfidf":
+                try:
+                    if self.vectorizer is None:
+                        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english', ngram_range=(1, 2))
+                    
+                    self.tfidf_matrix = self.vectorizer.fit_transform(all_texts)
+                    st.success(f"TF-IDF embeddings created for {len(all_texts)} chunks.")
+                    return True
+                    
+                except Exception as tfidf_error:
+                    st.error(f"TF-IDF also failed: {str(tfidf_error)}")
+                    return False
+            
+            return False
                 
         except Exception as e:
             st.error(f"Error creating embeddings: {str(e)}")
@@ -634,46 +604,57 @@ class PDFAIAssistant:
     def retrieve_relevant_chunks(self, query, top_k=5):
         """Retrieve most relevant text chunks for a query"""
         try:
-            # Try ChromaDB first
-            if self.collection and self.embedding_model:
-                try:
-                    query_embedding = self.embedding_model.encode([query])
-                    results = self.collection.query(
-                        query_embeddings=query_embedding.tolist(),
-                        n_results=top_k
-                    )
-                    return results['documents'][0] if results['documents'] else []
-                except Exception as chroma_error:
-                    st.warning(f"ChromaDB query failed: {str(chroma_error)}. Using TF-IDF fallback.")
+            if not self.all_chunks:
+                st.warning("No chunks available for retrieval.")
+                return []
             
-            # Fallback to TF-IDF
-            if self.vectorizer and self.tfidf_matrix is not None:
+            # Try FAISS first
+            if self.embedding_method == "faiss" and self.faiss_index is not None:
+                try:
+                    query_embedding = self.embedding_model.encode([query]).astype('float32')
+                    
+                    # Ensure we don't request more results than available
+                    k = min(top_k, self.faiss_index.ntotal)
+                    if k <= 0:
+                        return []
+                    
+                    distances, indices = self.faiss_index.search(query_embedding, k)
+                    
+                    relevant_chunks = []
+                    for idx in indices[0]:
+                        if 0 <= idx < len(self.all_chunks):
+                            relevant_chunks.append(self.all_chunks[idx]['text'])
+                    
+                    return relevant_chunks
+                    
+                except Exception as faiss_error:
+                    st.warning(f"FAISS retrieval failed: {str(faiss_error)}. Using TF-IDF fallback.")
+                    self.embedding_method = "tfidf"
+            
+            # TF-IDF fallback
+            if self.embedding_method == "tfidf" and self.tfidf_matrix is not None:
                 try:
                     query_vec = self.vectorizer.transform([query])
                     similarities = cosine_similarity(query_vec, self.tfidf_matrix)
+                    
+                    # Get top indices
                     top_indices = similarities[0].argsort()[-top_k:][::-1]
                     
-                    all_chunks = self.get_all_chunks()
-                    return [all_chunks[idx]['text'] for idx in top_indices if idx < len(all_chunks)]
+                    relevant_chunks = []
+                    for idx in top_indices:
+                        if 0 <= idx < len(self.all_chunks) and similarities[0][idx] > 0:
+                            relevant_chunks.append(self.all_chunks[idx]['text'])
+                    
+                    return relevant_chunks
+                    
                 except Exception as tfidf_error:
-                    st.warning(f"TF-IDF query failed: {str(tfidf_error)}")
+                    st.warning(f"TF-IDF retrieval failed: {str(tfidf_error)}")
             
-            st.warning("No valid vector store available for retrieval.")
-            return []
+            # Last resort: return first few chunks
+            return [chunk['text'] for chunk in self.all_chunks[:top_k]]
             
         except Exception as e:
             st.error(f"Error retrieving relevant chunks: {str(e)}")
-            return []
-    
-    def get_all_chunks(self):
-        """Get all text chunks from all loaded PDFs"""
-        try:
-            all_chunks = []
-            for chunks in st.session_state.all_pdf_chunks.values():
-                all_chunks.extend(chunks)
-            return all_chunks
-        except Exception as e:
-            st.error(f"Error retrieving all chunks: {str(e)}")
             return []
     
     def is_general_greeting_or_chat(self, user_query):
@@ -698,7 +679,7 @@ class PDFAIAssistant:
             query_lower = user_query.lower().strip()
             
             if any(greeting in query_lower for greeting in ['hello', 'hi', 'hey', 'mambo', 'hellow', 'salaam']):
-                return "Hi there! I'm MUST AI, your friendly assistant for Mbeya University of Science and Technology. Ready to help with your questions or dive into any documents you have—let me know what's up! 😊"
+                return "Hi there! I'm MUST AI, your friendly assistant for Mbeya University of Science and Technology. Ready to help with your questions or dive into any documents you have—let me know what's up!"
             
             elif 'how are you' in query_lower or 'inakuajee' in query_lower:
                 return "I'm doing awesome, thanks for asking! I'm MUST AI, here to support you with all things MUST. What's on your mind today?"
@@ -795,6 +776,7 @@ class PDFAIAssistant:
             return None
 
 def create_chart_from_data(chart_data, chart_title=None):
+    
     """Create Plotly chart from data"""
     try:
         if not chart_data or chart_data.get('chart_type') == 'none':
