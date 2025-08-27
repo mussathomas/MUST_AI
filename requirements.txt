@@ -2,7 +2,7 @@ streamlit
 pandas
 plotly
 google-generativeai
-PyPDF2
+pdfplumber
 numpy
 scikit-learn
 sentence-transformers
