@@ -729,7 +729,7 @@ with st.sidebar:
                             st.session_state.all_pdf_texts[pdf_info['name']] = pdf_text
                             st.session_state.all_pdf_chunks[pdf_info['name']] = pdf_chunks
                             loaded_count += 1
-                if loaded_count > 0 and await ai_assistant.create_embeddings_for_all_pdfs():
+                if loaded_count > 0 and asyncio.run(ai_assistant.create_embeddings_for_all_pdfs()):
                     st.session_state.embeddings_ready = True
                     st.session_state.vector_store = ai_assistant
                     loaded_names = [pdf['name'] for pdf in selected_pdfs[:loaded_count]]
