@@ -524,8 +524,8 @@ class PDFAIAssistant:
     
     def generate_greeting(self, pdf_names):
         pdf_list = ', '.join(pdf_names)
-        return f"Hi! I'm MUST AI, ready to answer questions about MUST. Loaded PDFs: {pdf_list}. Ask away!"
-    
+        return f"Hi! I'm MUST AI, ready to answer questions about MUST. Ask away!"
+
     async def generate_response(self, user_query, relevant_context="", enable_viz=False):
         try:
             if not relevant_context and self.is_general_greeting_or_chat(user_query):
