@@ -6,4 +6,4 @@ pdfplumber
 numpy<2.0
 scikit-learn
 sentence-transformers
-chromadb==0.4.22
+faiss-cpu
